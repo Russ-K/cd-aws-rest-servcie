@@ -1,0 +1,234 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "ProjectName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Name of the service project"
+    }
+  },
+  "Resources": {
+    "BuildBucket": {
+      "Type": "AWS::S3::Bucket"
+    },
+
+    "SourceRepo": {
+      "Type": "AWS::CodeCommit::Repository",
+      "Properties": {
+        "RepositoryDescription": "Repo containing service source files",
+        "RepositoryName": { "Fn::Sub": "${AWS::StackName}-SourceRepo" }
+      }
+    },
+
+    "BuilderRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["codebuild.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        }
+      }
+    },
+    "BuilderPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "CodeBuildPolicy",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogsPolicy",
+              "Effect": "Allow",
+              "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+              "Resource": ["*"]
+            },
+            {
+              "Sid": "BuildBucketPolicy",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject"
+              ],
+              "Resource": [
+                { "Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "BuildBucket"}, "/*"]]},
+                { "Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "BuildBucket"}]]}
+              ]
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "BuilderRole"
+          }
+        ]
+      }
+    },
+    "BuildProject": {
+      "Type": "AWS::CodeBuild::Project",
+      "Properties": {
+        "Artifacts": {
+          "Type": "S3",
+          "Location": { "Ref": "BuildBucket" },
+          "Name": { "Fn::Sub": "catalog" },
+          "Packaging": "NONE"
+        },
+        "BadgeEnabled": true,
+        "Cache": {
+          "Location": { "Fn::Join": ["", [{"Ref": "BuildBucket"}, "/cache"]]},
+          "Type": "S3"
+        },
+        "Environment": {
+          "ComputeType": "BUILD_GENERAL1_SMALL",
+          "Image": "aws/codebuild/nodejs:10.14.1",
+          "Type": "LINUX_CONTAINER"
+        },
+        "Name": { "Fn::Sub": "${AWS::StackName}" },
+        "ServiceRole": { "Ref": "BuilderRole" },
+        "Source": {
+          "Location": { "Fn::GetAtt": ["SourceRepo", "CloneUrlHttp"] },
+          "Type": "CODECOMMIT"
+        }
+      }
+    },
+
+    "PipelineRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["codepipeline.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        }
+      }
+    },
+    "PipelinePolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "PipelinePolicy",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Sid": "CloudWatchLogsPolicy",
+              "Effect": "Allow",
+              "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+              "Resource": ["*"]
+            },
+            {
+              "Sid": "CodeCommitPolicy",
+              "Effect": "Allow",
+              "Action": [
+                "codecommit:GetBranch",
+                "codecommit:GetCommit",
+                "codecommit:UploadArchive",
+                "codecommit:GetUploadArchiveStatus"
+              ],
+              "Resource": [{ "Fn::GetAtt": ["SourceRepo", "Arn"] }]
+            },
+            {
+              "Sid": "BuildBucketPolicy",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject"
+              ],
+              "Resource": [
+                { "Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "BuildBucket"}, "/*"]]},
+                { "Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "BuildBucket"}]]}
+              ]
+            },
+            {
+              "Sid": "CodeBuildPolicy",
+              "Effect": "Allow",
+              "Action": [
+                "codebuild:StartBuild",
+                "codebuild:BatchGetBuilds"
+              ],
+              "Resource": [{ "Fn::GetAtt": ["BuildProject", "Arn"] }]
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "PipelineRole"
+          }
+        ]
+      }
+    },
+
+    "ProjectBuilderPipeline": {
+      "Type": "AWS::CodePipeline::Pipeline",
+      "Properties": {
+        "Name": { "Fn::Sub": "${AWS::StackName}-Pipeline" },
+        "ArtifactStore": {
+          "Type": "S3",
+          "Location": { "Ref": "BuildBucket" }
+        },
+        "RoleArn": { "Fn::GetAtt": ["PipelineRole", "Arn"] },
+        "Stages": [
+          {
+            "Name": "Source",
+            "Actions": [
+              {
+                "ActionTypeId": {
+                  "Category": "Source",
+                  "Owner": "AWS",
+                  "Provider": "CodeCommit",
+                  "Version": "1"
+                },
+                "Configuration": {
+                  "RepositoryName": { "Fn::GetAtt": ["SourceRepo", "Name"] },
+                  "BranchName": "master"
+                },
+                "Name": "SourceTriggeredBuild",
+                "OutputArtifacts": [{ "Name": "SourceOutput" }]
+              }
+            ]
+          },
+          {
+            "Name": "Build",
+            "Actions": [
+              {
+                "ActionTypeId": {
+                  "Category": "Build",
+                  "Owner": "AWS",
+                  "Provider": "CodeBuild",
+                  "Version": "1"
+                },
+                "Configuration": {
+                  "ProjectName": { "Ref": "BuildProject" },
+                  "EnvironmentVariables": { 
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[{ \"name\":\"BUILD_BUCKET\", \"value\": \"",
+                        {
+                          "Ref": "BuildBucket"
+                        },
+                        "\", \"type\":\"PLAINTEXT\" }]"
+                      ]
+                    ]
+                  }
+                },
+                "Name": "BuildTheService",
+                "InputArtifacts": [{ "Name": "SourceOutput" }]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
